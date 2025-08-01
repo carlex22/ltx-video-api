@@ -1,4 +1,18 @@
-# handler.py
+"""
+handler.py para Endpoint de Geração de Vídeo no RunPod.
+
+Este handler executa a lógica de inferência para um modelo de geração de
+vídeo. Ele é projetado para ser executado em um ambiente serverless, com
+uma fase de inicialização (cold start) para carregar os modelos e uma
+função de handler para processar cada requisição de forma eficiente.
+
+Funcionalidades:
+- Suporta geração de Texto-para-Vídeo.
+- Suporta geração de Imagem-para-Vídeo, aceitando a imagem de entrada
+  tanto como uma string Base64 (preferencial) quanto via URL.
+- Retorna o vídeo gerado como uma string Base64 na resposta da API.
+- Gerencia a memória da GPU e arquivos temporários de forma segura.
+"""
 
 import torch
 import numpy as np
@@ -14,7 +28,6 @@ import runpod
 import requests
 import traceback
 import base64
-from huggingface_hub import hf_hub_download
 
 # Importação de módulos locais do projeto
 from inference import (
@@ -27,11 +40,6 @@ from ltx_video.utils.skip_layer_strategy import SkipLayerStrategy
 # =========================================================================== #
 #                      INICIALIZAÇÃO DO WORKER (COLD START)                     #
 # =========================================================================== #
-# Este bloco é executado uma única vez na inicialização de um novo worker.     #
-# Ele carrega os modelos e os prepara para uso, otimizando as execuções       #
-# subsequentes ("warm starts").                                               #
-# =========================================================================== #
-
 TARGET_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CONFIG_FILE_PATH = "configs/ltxv-13b-0.9.8-distilled.yaml"
 
@@ -42,11 +50,9 @@ LTX_REPO = "Lightricks/LTX-Video"
 MODELS_DIR = "downloaded_models"
 Path(MODELS_DIR).mkdir(parents=True, exist_ok=True)
 
-# Download dos modelos a partir do Hugging Face Hub para o disco local.
 distilled_model_path = hf_hub_download(repo_id=LTX_REPO, filename=PIPELINE_CONFIG["checkpoint_path"], local_dir=MODELS_DIR)
 spatial_upscaler_path = hf_hub_download(repo_id=LTX_REPO, filename=PIPELINE_CONFIG["spatial_upscaler_model_path"], local_dir=MODELS_DIR)
 
-# Instanciação dos pipelines na GPU para estarem prontos para inferência.
 pipeline_instance = create_ltx_video_pipeline(
     ckpt_path=distilled_model_path,
     precision=PIPELINE_CONFIG["precision"],
@@ -64,31 +70,15 @@ print(f"Worker inicializado com sucesso no dispositivo: {TARGET_DEVICE}")
 # =========================================================================== #
 #                          HANDLER DE REQUISIÇÃO                               #
 # =========================================================================== #
-
 def handler(job):
-    """
-    Processa uma única requisição de inferência para geração de vídeo.
-
-    Esta função é o ponto de entrada para cada job recebido pelo endpoint.
-    Ela extrai os parâmetros, executa o pipeline de geração de vídeo,
-    e retorna o vídeo resultante codificado em Base64.
-
-    Args:
-        job (dict): Um dicionário contendo os dados da requisição,
-                    principalmente a chave 'input' com os parâmetros.
-
-    Returns:
-        dict: Um dicionário contendo o vídeo em Base64 sob a chave 'video_base64'
-              em caso de sucesso, ou uma mensagem de erro sob a chave 'error'.
-    """
     job_input = job['input']
     temp_dir = tempfile.mkdtemp()
+    input_image_filepath = None
 
     try:
-        # Extração de parâmetros da requisição com valores padrão.
+        # Extração de parâmetros da requisição
         prompt = job_input.get('prompt', 'A majestic dragon flying over a medieval castle')
-        negative_prompt = job_input.get('negative_prompt', 'bad quality, inconsistent motion, blurry, shaky, distorted')
-        input_image_url = job_input.get('input_image_url')
+        negative_prompt = job_input.get('negative_prompt', 'bad quality, blurry, distorted')
         height = int(job_input.get('height', 512))
         width = int(job_input.get('width', 704))
         duration_seconds = float(job_input.get('duration_seconds', 2.0))
@@ -100,17 +90,41 @@ def handler(job):
         seed = int(seed) if seed is not None else random.randint(0, 2**32 - 1)
         seed_everething(seed)
 
-        # Cálculo de dimensões e número de frames.
+        # Lógica para processar a imagem de entrada (Base64 ou URL)
+        input_image_base64 = job_input.get('input_image_base64')
+        input_image_url = job_input.get('input_image_url')
+
+        if input_image_base64:
+            try:
+                image_data = base64.b64decode(input_image_base64)
+                input_image_filepath = os.path.join(temp_dir, "input_image.png")
+                with open(input_image_filepath, 'wb') as f:
+                    f.write(image_data)
+            except Exception as e:
+                print(f"Erro ao decodificar imagem Base64: {e}. Ignorando imagem.")
+                input_image_filepath = None
+        elif input_image_url:
+            try:
+                response = requests.get(input_image_url, stream=True, timeout=20)
+                response.raise_for_status()
+                input_image_filepath = os.path.join(temp_dir, "input_image_from_url.png")
+                with open(input_image_filepath, 'wb') as f:
+                    shutil.copyfileobj(response.raw, f)
+            except Exception as e:
+                print(f"Erro ao baixar imagem da URL: {e}. Ignorando imagem.")
+                input_image_filepath = None
+
+        # Cálculo de dimensões e número de frames
         MAX_NUM_FRAMES = 257
         target_frames_ideal = duration_seconds * fps
-        n_val = round((float(round(target_frames_ideal)) - 1.0) / 8.0)
+        n_val = round((target_frames_ideal - 1.0) / 8.0)
         actual_num_frames = max(9, min(int(n_val * 8 + 1), MAX_NUM_FRAMES))
         height_padded = ((height - 1) // 32 + 1) * 32
         width_padded = ((width - 1) // 32 + 1) * 32
         num_frames_padded = ((actual_num_frames - 2) // 8 + 1) * 8 + 1
         padding_values = calculate_padding(height, width, height_padded, width_padded)
 
-        # Construção do dicionário de argumentos para a chamada do pipeline.
+        # Construção do dicionário de argumentos para o pipeline
         call_kwargs = {
             "prompt": prompt, "negative_prompt": negative_prompt, "height": height_padded,
             "width": width_padded, "num_frames": num_frames_padded, "frame_rate": fps,
@@ -128,18 +142,12 @@ def handler(job):
         stg_map = {"attention_values": SkipLayerStrategy.AttentionValues, "attention_skip": SkipLayerStrategy.AttentionSkip, "residual": SkipLayerStrategy.Residual, "transformer_block": SkipLayerStrategy.TransformerBlock}
         call_kwargs["skip_layer_strategy"] = stg_map.get(stg_mode_str.lower(), SkipLayerStrategy.AttentionValues)
 
-        # Lógica de condicionamento para o modo Image-to-Video.
-        if input_image_url:
-            response = requests.get(input_image_url, stream=True, timeout=20)
-            response.raise_for_status()
-            input_image_filepath = os.path.join(temp_dir, "input_image.png")
-            with open(input_image_filepath, 'wb') as f:
-                shutil.copyfileobj(response.raw, f)
+        if input_image_filepath:
             media_tensor = load_image_to_tensor_with_resize_and_crop(input_image_filepath, height, width)
             media_tensor = torch.nn.functional.pad(media_tensor, padding_values)
             call_kwargs["conditioning_items"] = [ConditioningItem(media_tensor.to(TARGET_DEVICE), 0, 1.0)]
 
-        # Execução do pipeline de inferência.
+        # Execução do pipeline de inferência
         if improve_texture and latent_upsampler_instance:
             multi_scale_pipeline_obj = LTXMultiScalePipeline(pipeline_instance, latent_upsampler_instance)
             first_pass_args = {**PIPELINE_CONFIG.get("first_pass", {}), "guidance_scale": cfg_scale}
@@ -151,7 +159,7 @@ def handler(job):
             single_pass_kwargs = {**call_kwargs, "guidance_scale": cfg_scale, "timesteps": first_pass_config.get("timesteps")}
             result_images_tensor = pipeline_instance(**single_pass_kwargs).images
 
-        # Pós-processamento e salvamento do vídeo em um arquivo temporário.
+        # Pós-processamento e salvamento do vídeo em um arquivo temporário
         pad_left, pad_right, pad_top, pad_bottom = padding_values
         slice_h, slice_w = (-pad_bottom if pad_bottom > 0 else None), (-pad_right if pad_right > 0 else None)
         result_images_tensor_cropped = result_images_tensor[:, :, :actual_num_frames, pad_top:slice_h, pad_left:slice_w]
@@ -162,7 +170,7 @@ def handler(job):
             for frame in video_np:
                 video_writer.append_data(frame)
 
-        # Codificação do vídeo em Base64 para retorno direto na resposta da API.
+        # Codificação do vídeo em Base64 para retorno na resposta da API
         with open(output_video_path, "rb") as video_file:
             video_bytes = video_file.read()
         base64_encoded_video = base64.b64encode(video_bytes).decode('utf-8')
@@ -178,7 +186,7 @@ def handler(job):
         return {"error": f"Ocorreu um erro inesperado: {str(e)}"}
 
     finally:
-        # Garante a limpeza dos recursos (arquivos e memória) ao final de cada execução.
+        # Garante a limpeza dos recursos ao final de cada execução
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         gc.collect()
