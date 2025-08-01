@@ -2,7 +2,7 @@
 
 # Use uma imagem base oficial do RunPod com PyTorch e CUDA pré-instalados.
 # Isso economiza tempo de build e garante compatibilidade.
-FROM runpod/pytorch:2.1.0-cuda12.1.0-devel-ubuntu22.04
+FROM runpod/pytorch:2.1.2-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 # Define o diretório de trabalho dentro do contêiner.
 # Todos os comandos subsequentes serão executados a partir daqui.
