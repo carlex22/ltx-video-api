@@ -14,6 +14,7 @@ import runpod
 import requests
 import traceback
 import base64
+from huggingface_hub import hf_hub_download
 
 # Importação de módulos locais do projeto
 from inference import (
