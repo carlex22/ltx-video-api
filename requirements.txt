@@ -5,6 +5,7 @@ torch
 transformers
 diffusers
 accelerate
+cv2
 
 # Utilitários e manipulação de dados
 numpy
