@@ -1,0 +1,18 @@
+# requirements.txt
+
+# Frameworks de Machine Learning
+torch
+transformers
+diffusers
+accelerate
+
+# Utilitários e manipulação de dados
+numpy
+PyYAML
+Pillow
+ftfy
+imageio[ffmpeg]
+
+# Comunicação com a plataforma RunPod e serviços web
+runpod
+requests
