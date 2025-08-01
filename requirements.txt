@@ -3,7 +3,6 @@
 # Frameworks de Machine Learning
 torch
 transformers
-diffusers
 accelerate
 opencv-python
 
@@ -17,3 +16,19 @@ imageio[ffmpeg]
 # Comunicação com a plataforma RunPod e serviços web
 runpod
 requests
+
+accelerate
+transformers
+sentencepiece
+pillow
+numpy
+torchvision
+huggingface_hub
+spaces
+opencv-python
+imageio
+imageio-ffmpeg
+einops
+timm
+av
+git+https://github.com/huggingface/diffusers.git@main
