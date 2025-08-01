@@ -8,8 +8,6 @@ import yaml
 from pathlib import Path
 import imageio
 import tempfile
-from PIL import Image
-from huggingface_hub import hf_hub_download
 import shutil
 import gc
 import runpod
@@ -28,11 +26,6 @@ from ltx_video.utils.skip_layer_strategy import SkipLayerStrategy
 # --------------------------------------------------------------------------- #
 #                      INICIALIZAÇÃO DO WORKER (COLD START)                     #
 # --------------------------------------------------------------------------- #
-# Este bloco é executado uma única vez na inicialização de um novo worker.     #
-# Ele carrega os modelos e os prepara para uso, otimizando as execuções       #
-# subsequentes ("warm starts").                                               #
-# --------------------------------------------------------------------------- #
-
 TARGET_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CONFIG_FILE_PATH = "configs/ltxv-13b-0.9.8-distilled.yaml"
 
@@ -67,7 +60,6 @@ latent_upsampler_instance = create_latent_upsampler(
     spatial_upscaler_path,
     device=TARGET_DEVICE
 )
-
 print(f"Worker inicializado com sucesso no dispositivo: {TARGET_DEVICE}")
 
 # --------------------------------------------------------------------------- #
@@ -76,18 +68,6 @@ print(f"Worker inicializado com sucesso no dispositivo: {TARGET_DEVICE}")
 def handler(job):
     """
     Processa uma única requisição de inferência para geração de vídeo.
-
-    Esta função é o ponto de entrada para cada job recebido pelo endpoint.
-    Ela extrai os parâmetros, executa o pipeline de geração de vídeo,
-    e retorna o vídeo resultante codificado em Base64.
-
-    Args:
-        job (dict): Um dicionário contendo os dados da requisição,
-                    principalmente a chave 'input' com os parâmetros.
-
-    Returns:
-        dict: Um dicionário contendo o vídeo em Base64 sob a chave 'video_base64'
-              em caso de sucesso, ou uma mensagem de erro sob a chave 'error'.
     """
     job_input = job['input']
     temp_dir = tempfile.mkdtemp()
@@ -117,14 +97,35 @@ def handler(job):
         width_padded = ((width - 1) // 32 + 1) * 32
         num_frames_padded = ((actual_num_frames - 2) // 8 + 1) * 8 + 1
         padding_values = calculate_padding(height, width, height_padded, width_padded)
-        
-        call_kwargs = {
-            "prompt": prompt, "negative_prompt": negative_prompt, "height": height_padded,
-            "width": width_padded, "num_frames": num_frames_padded, "frame_rate": fps,
-            "generator": torch.Generator(device=TARGET_DEVICE).manual_seed(seed),
-            "output_type": "pt"
-        }
 
+        # --- CORREÇÃO PRINCIPAL: CONSTRUÇÃO COMPLETA DO DICIONÁRIO DE ARGUMENTOS ---
+        # Este dicionário agora inclui todas as chaves que o pipeline espera,
+        # prevenindo o erro 'KeyError'.
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "height": height_padded,
+            "width": width_padded,
+            "num_frames": num_frames_padded,
+            "frame_rate": fps,
+            "generator": torch.Generator(device=TARGET_DEVICE).manual_seed(seed),
+            "output_type": "pt",
+            "conditioning_items": None,
+            "media_items": None,
+            "decode_timestep": PIPELINE_CONFIG["decode_timestep"],
+            "decode_noise_scale": PIPELINE_CONFIG["decode_noise_scale"],
+            "stochastic_sampling": PIPELINE_CONFIG["stochastic_sampling"],
+            "image_cond_noise_scale": 0.15,
+            "is_video": True,
+            "vae_per_channel_normalize": True,
+            "mixed_precision": (PIPELINE_CONFIG["precision"] == "mixed_precision"),
+            "offload_to_cpu": False,
+            "enhance_prompt": False
+        }
+        stg_mode_str = PIPELINE_CONFIG.get("stg_mode", "attention_values")
+        stg_map = {"attention_values": SkipLayerStrategy.AttentionValues, "attention_skip": SkipLayerStrategy.AttentionSkip, "residual": SkipLayerStrategy.Residual, "transformer_block": SkipLayerStrategy.TransformerBlock}
+        call_kwargs["skip_layer_strategy"] = stg_map.get(stg_mode_str.lower(), SkipLayerStrategy.AttentionValues)
+        
         # Lógica de condicionamento para Image-to-Video
         if input_image_url:
             response = requests.get(input_image_url, stream=True, timeout=20)
@@ -151,8 +152,7 @@ def handler(job):
 
         # Pós-processamento e salvamento do vídeo
         pad_left, pad_right, pad_top, pad_bottom = padding_values
-        slice_h = -pad_bottom if pad_bottom > 0 else None
-        slice_w = -pad_right if pad_right > 0 else None
+        slice_h, slice_w = (-pad_bottom if pad_bottom > 0 else None), (-pad_right if pad_right > 0 else None)
         result_images_tensor_cropped = result_images_tensor[:, :, :actual_num_frames, pad_top:slice_h, pad_left:slice_w]
         video_np = (result_images_tensor_cropped[0].permute(1, 2, 3, 0).cpu().float().numpy() * 255).astype(np.uint8)
         
@@ -164,7 +164,6 @@ def handler(job):
         # Codificação do vídeo em Base64 para retorno na API
         with open(output_video_path, "rb") as video_file:
             video_bytes = video_file.read()
-        
         base64_encoded_video = base64.b64encode(video_bytes).decode('utf-8')
 
         # Retorno de sucesso
@@ -175,7 +174,6 @@ def handler(job):
         }
 
     except Exception as e:
-        # Em caso de erro, registrar o traceback e retornar uma resposta de erro
         traceback.print_exc()
         return {"error": f"Ocorreu um erro inesperado: {str(e)}"}
         
@@ -190,4 +188,4 @@ def handler(job):
 #                      INICIALIZAÇÃO DO SERVIDOR RUNPOD                         #
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    runpod.serverless.start({"handler": handler})
+    runpod.serverless.start({"handler": handler})-
