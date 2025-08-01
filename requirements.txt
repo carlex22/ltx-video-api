@@ -5,7 +5,7 @@ torch
 transformers
 diffusers
 accelerate
-cv2
+opencv-python
 
 # Utilitários e manipulação de dados
 numpy
