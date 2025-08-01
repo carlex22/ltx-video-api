@@ -188,4 +188,4 @@ def handler(job):
 #                      INICIALIZAÇÃO DO SERVIDOR RUNPOD                         #
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    runpod.serverless.start({"handler": handler})-
+    runpod.serverless.start({"handler": handler})
