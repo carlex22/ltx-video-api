@@ -27,6 +27,8 @@ import gc
 import runpod
 import requests
 import traceback
+from huggingface_hub import hf_hub_download
+
 import base64
 
 # Importação de módulos locais do projeto
